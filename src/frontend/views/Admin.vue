@@ -143,7 +143,7 @@
                   <td><span class="price-tag">{{ server.price || '-' }}</span></td>
                   <td><span class="date-text">{{ server.expire_date || '-' }}</span></td>
                   <td><span class="spec-text">{{ server.bandwidth || '-' }}</span></td>
-                  <td><span class="spec-text">{{ server.traffic_limit || '-' }}</span></td>
+                  <td><span class="spec-text">{{ server.traffic_limit ? formatBytes(server.traffic_limit * 1024 * 1024 * 1024) : '-' }}</span></td>
                   <td>
                     <span :style="{ color: getStatusColor(server) }" class="font-bold">{{ getStatusText(server) }}</span>
                   </td>
@@ -409,34 +409,55 @@
           </div>
           <input type="hidden" v-model="editForm.id">
 
-          <div class="form-group">
-            <label class="form-label">{{ trans.hostnameLabel }} <span class="required">*</span></label>
-            <input type="text" name="edit_name" autocomplete="off" v-model="editForm.name" class="form-input" placeholder="e.g. My Server">
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label class="form-label">{{ trans.hostnameLabel }} <span class="required">*</span></label>
+              <input type="text" name="edit_name" autocomplete="off" v-model="editForm.name" class="form-input" placeholder="e.g. My Server">
+            </div>
+
+            <div class="form-group flex-1">
+              <label class="form-label">{{ trans.groupName }}</label>
+              <input type="text" name="edit_server_group" autocomplete="off" v-model="editForm.server_group" class="form-input" placeholder="e.g. US VPS">
+            </div>
           </div>
 
-          <div class="form-group">
-            <label class="form-label">{{ trans.groupName }}</label>
-            <input type="text" name="edit_server_group" autocomplete="off" v-model="editForm.server_group" class="form-input" placeholder="e.g. US VPS">
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label class="form-label">{{ trans.price }}</label>
+              <input type="text" name="edit_price" autocomplete="off" v-model="editForm.price" class="form-input" placeholder="e.g. $40/Y">
+            </div>
+
+            <div class="form-group flex-1">
+              <label class="form-label">{{ trans.expirationDate }}</label>
+              <input type="date" name="edit_expire_date" autocomplete="off" v-model="editForm.expire_date" class="form-input">
+            </div>
+
+            <div class="form-group flex-1">
+              <label class="form-label">{{ trans.bandwidth }}</label>
+              <input type="text" name="edit_bandwidth" autocomplete="off" v-model="editForm.bandwidth" class="form-input" placeholder="e.g. 1Gbps">
+            </div>
           </div>
 
-          <div class="form-group">
-            <label class="form-label">{{ trans.price }}</label>
-            <input type="text" name="edit_price" autocomplete="off" v-model="editForm.price" class="form-input" placeholder="e.g. $40/Y">
-          </div>
 
-          <div class="form-group">
-            <label class="form-label">{{ trans.expirationDate }}</label>
-            <input type="date" name="edit_expire_date" autocomplete="off" v-model="editForm.expire_date" class="form-input">
-          </div>
-
-          <div class="form-group">
-            <label class="form-label">{{ trans.bandwidth }}</label>
-            <input type="text" name="edit_bandwidth" autocomplete="off" v-model="editForm.bandwidth" class="form-input" placeholder="e.g. 1Gbps">
-          </div>
-
-          <div class="form-group">
-            <label class="form-label">{{ trans.trafficLimit }}</label>
-            <input type="text" name="edit_traffic_limit" autocomplete="off" v-model="editForm.traffic_limit" class="form-input" placeholder="e.g. 1TB">
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label class="form-label">{{ trans.trafficLimit }} (GB)</label>
+              <input type="number" name="edit_traffic_limit" autocomplete="off" v-model="editForm.traffic_limit" class="form-input" placeholder="e.g. 1000" min="0" step="1">
+            </div>
+            <div class="form-group flex-1">
+              <label class="form-label">{{ trans.trafficCalcType }}</label>
+              <select v-model="editForm.traffic_calc_type" class="form-select">
+                <option value="total">{{ trans.trafficCalcTotal }}</option>
+                <option value="ul">{{ trans.trafficCalcUl }}</option>
+                <option value="dl">{{ trans.trafficCalcDl }}</option>
+              </select>
+            </div>
+            <div class="form-group flex-1">
+              <label class="form-label">{{ trans.trafficResetDay }}</label>
+              <select ref="editResetDayRef" name="edit_reset_day" v-model="editForm.reset_day" class="form-select">
+                <option v-for="day in 31" :key="day" :value="day">{{ day }}</option>
+              </select>
+            </div>
           </div>
 
           <div class="form-row">
@@ -454,12 +475,6 @@
               <select v-model="editForm.ping_mode" class="form-select">
                 <option value="http">HTTP</option>
                 <option value="tcp">TCP</option>
-              </select>
-            </div>
-            <div class="form-group flex-1">
-              <label class="form-label">{{ trans.trafficResetDay }}</label>
-              <select ref="editResetDayRef" name="edit_reset_day" v-model="editForm.reset_day" class="form-select">
-                <option v-for="day in 31" :key="day" :value="day">{{ day }}</option>
               </select>
             </div>
           </div>
@@ -533,6 +548,7 @@
             <select v-model="targetOs" class="form-select">
               <option value="linux">Linux (Ubuntu/Debian/CentOS)</option>
               <option value="alpine">Alpine Linux</option>
+              <option value="openwrt">OpenWrt / LEDE / ImmortalWrt</option>
               <option value="windows">Windows</option>
             </select>
           </div>
@@ -548,13 +564,6 @@
               <label class="form-label">{{ trans.pingMode }}</label>
               <div class="flex items-center gap-2">
                 <input type="text" readonly :value="pingMode.toUpperCase()" class="form-input" style="width: 100px; background-color: var(--bg-secondary);">
-              </div>
-            </div>
-            <div class="form-group flex-1">
-              <label class="form-label">{{ trans.trafficResetDay }}</label>
-              <div class="flex items-center gap-2">
-                <input type="text" readonly :value="resetDay" class="form-input" style="width: 100px; background-color: var(--bg-secondary);">
-                <button @click="openEditModalFromCopy" class="btn btn-icon btn-blue" :title="trans.edit">✏️</button>
               </div>
             </div>
           </div>
@@ -578,6 +587,24 @@
             <div class="form-group flex-1">
               <label class="form-label">{{ trans.customBd }}</label>
               <input type="text" name="custom_bd" autocomplete="off" v-model="customBd" class="form-input" placeholder="lf3-ips.zstaticcdn.com">
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group flex-1">
+              <label class="form-label">{{ trans.trafficResetDay }}</label>
+              <div class="flex items-center gap-2">
+                <input type="text" readonly :value="resetDay" class="form-input" style="width: 100px; background-color: var(--bg-secondary);">
+                <button @click="openEditModalFromCopy" class="btn btn-icon btn-blue" :title="trans.edit">✏️</button>
+              </div>
+            </div>
+            <div class="form-group flex-1">
+              <label class="form-label">{{ trans.rxCorrection }} (GB)</label>
+              <input type="number" name="rx_correction" autocomplete="off" v-model="rxCorrection" class="form-input" placeholder="0" min="0" step="1">
+            </div>
+            <div class="form-group flex-1">
+              <label class="form-label">{{ trans.txCorrection }} (GB)</label>
+              <input type="number" name="tx_correction" autocomplete="off" v-model="txCorrection" class="form-input" placeholder="0" min="0" step="1">
             </div>
           </div>
 
@@ -740,6 +767,7 @@ const editForm = ref({
   expire_date: '',
   bandwidth: '',
   traffic_limit: '',
+  traffic_calc_type: 'total',
   reset_day: 1,
   report_interval: 60,
   ping_mode: 'http',
@@ -768,6 +796,9 @@ const customCu = ref('')
 const customCm = ref('')
 const customBd = ref('')
 const resetDay = ref(1)
+const rxCorrection = ref('')
+const txCorrection = ref('')
+const trafficCalcType = ref('total')
 const copiedCmd = ref(false)
 
 const handleLogin = async () => {
@@ -1046,6 +1077,9 @@ const copyCmd = (serverId) => {
   customCm.value = settings.value.custom_cm
   customBd.value = settings.value.custom_bd
   resetDay.value = server?.reset_day || 1
+  rxCorrection.value = ''
+  txCorrection.value = ''
+  trafficCalcType.value = server?.traffic_calc_type || 'total'
   copiedCmd.value = false
   showCopyModal.value = true
 }
@@ -1055,13 +1089,17 @@ const getCustomInstallCommand = () => {
   if (targetOs.value === 'windows') {
     return `${HOST}/cf-server-monitor.pyw`
   }
-  const shell = targetOs.value === 'alpine' ? 'sh' : 'bash'
-  const script = targetOs.value === 'alpine' ? 'install-alpine.sh' : 'install.sh'
+  const shell = targetOs.value === 'alpine' || targetOs.value === 'openwrt' ? 'sh' : 'bash'
+  const script = targetOs.value === 'alpine' ? 'install-alpine.sh'
+    : targetOs.value === 'openwrt' ? 'install-openwrt.sh'
+    : 'install.sh'
   let cmd = `curl -sL ${HOST}/${script} | ${shell} -s install -id=${copyServerId.value} -secret='${apiSecret.value}' -url=${HOST}/update -interval=${reportInterval.value} -ping=${pingMode.value} -reset_day=${resetDay.value || 1}`
   if (customCt.value) cmd += ` -ct=${customCt.value}`
   if (customCu.value) cmd += ` -cu=${customCu.value}`
   if (customCm.value) cmd += ` -cm=${customCm.value}`
   if (customBd.value) cmd += ` -bd=${customBd.value}`
+  if (rxCorrection.value && rxCorrection.value !== '') cmd += ` -rx_correction=${rxCorrection.value}`
+  if (txCorrection.value && txCorrection.value !== '') cmd += ` -tx_correction=${txCorrection.value}`
   return cmd
 }
 
@@ -1117,6 +1155,7 @@ const openEditModal = (server) => {
     expire_date: server.expire_date || '',
     bandwidth: server.bandwidth || '',
     traffic_limit: server.traffic_limit || '',
+    traffic_calc_type: server.traffic_calc_type || 'total',
     reset_day: server.reset_day || 1,
     report_interval: server.report_interval || 60,
     ping_mode: server.ping_mode || 'http',
@@ -1139,6 +1178,7 @@ const saveEdit = async () => {
       expire_date: editForm.value.expire_date,
       bandwidth: editForm.value.bandwidth,
       traffic_limit: editForm.value.traffic_limit,
+      traffic_calc_type: editForm.value.traffic_calc_type,
       reset_day: editForm.value.reset_day,
       report_interval: editForm.value.report_interval,
       ping_mode: editForm.value.ping_mode,

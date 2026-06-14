@@ -75,7 +75,11 @@
         </div>
         <div class="sysinfo-item" v-if="server.net_rx_monthly">
           <span class="sysinfo-label">📦 {{ trans.monthlyTrafficLimit }}</span>
-          <span class="sysinfo-value sysinfo-small">{{ formatBytes(server.net_rx_monthly + server.net_tx_monthly) }} / {{ server.traffic_limit ? server.traffic_limit : 'Unlimited' }}</span>
+          <span class="sysinfo-value sysinfo-small">
+            {{ server.traffic_calc_type === 'dl' ? formatBytes(server.net_rx_monthly) : (server.traffic_calc_type === 'ul' ? formatBytes(server.net_tx_monthly) : formatBytes(server.net_rx_monthly + server.net_tx_monthly)) }} 
+            / 
+            {{ server.traffic_limit ? formatBytes(server.traffic_limit * 1024 * 1024 * 1024) : 'Unlimited' }}
+          </span>
         </div>
         <div class="sysinfo-item">
           <span class="sysinfo-label">🕐 {{ trans.bootTime }}</span>

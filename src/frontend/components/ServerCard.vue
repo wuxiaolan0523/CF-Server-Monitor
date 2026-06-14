@@ -18,7 +18,7 @@
       </div>
       <div class="card-badges">
         <span v-if="sysConfig.show_bw && server.bandwidth" class="badge badge-bw">{{ server.bandwidth }}</span>
-        <span v-if="sysConfig.show_tf && server.traffic_limit" class="badge badge-tf">{{ server.traffic_limit }}</span>
+        <span v-if="sysConfig.show_tf && server.traffic_limit" class="badge badge-tf">{{ formatBytes(server.traffic_limit * 1024 * 1024 * 1024) }}</span>
         <span v-if="server.ip_v4 === '1'" class="badge badge-v4">IPv4</span>
         <span v-if="server.ip_v6 === '1'" class="badge badge-v6">IPv6</span>
       </div>
@@ -44,6 +44,13 @@
           <div class="stat-bar-fill" :style="{ width: diskPercent + '%', background: 'var(--accent-green)' }"></div>
         </div>
         <span class="stat-value">{{ diskPercent }}%</span>
+      </div>
+      <div class="stat-row" v-if="sysConfig.show_tf && server.traffic_limit">
+        <span class="stat-key">USE</span>
+        <div class="stat-bar-container">
+          <div class="stat-bar-fill" :style="{ width: Math.min(100, parseFloat(trafficUsagePercent)) + '%', background: 'var(--accent-blue)' }"></div>
+        </div>
+        <span class="stat-value">{{ trafficUsagePercent }}%</span>
       </div>
       <div class="stat-row">
         <span class="stat-key">NET</span>
@@ -122,6 +129,26 @@ const statusText = computed(() => isOnline.value ? trans.value.online : trans.va
 const cpuPercent = computed(() => parseFloat(props.server.cpu || 0).toFixed(1))
 const ramPercent = computed(() => parseFloat(props.server.ram || 0).toFixed(1))
 const diskPercent = computed(() => parseFloat(props.server.disk || 0).toFixed(1))
+
+const trafficUsagePercent = computed(() => {
+  const limit = parseFloat(props.server.traffic_limit) || 0
+  if (limit <= 0) return '0'
+  
+  const limitBytes = limit * 1024 * 1024 * 1024
+  let usedBytes = 0
+  
+  const calcType = props.server.traffic_calc_type || 'total'
+  if (calcType === 'dl') {
+    usedBytes = parseFloat(props.server.net_rx_monthly) || 0
+  } else if (calcType === 'ul') {
+    usedBytes = parseFloat(props.server.net_tx_monthly) || 0
+  } else {
+    usedBytes = (parseFloat(props.server.net_rx_monthly) || 0) + (parseFloat(props.server.net_tx_monthly) || 0)
+  }
+  
+  const percent = (usedBytes / limitBytes) * 100
+  return percent.toFixed(1)
+})
 
 const netInSpeed = computed(() => formatBytes(props.server.net_in_speed))
 const netOutSpeed = computed(() => formatBytes(props.server.net_out_speed))

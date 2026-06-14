@@ -1,9 +1,10 @@
 # [CF-Server-Monitor](https://github.com/huilang-me/CF-Server-Monitor)
 
-一个基于 Cloudflare Workers + D1 的多服务器监控探针系统，支持实时监控、历史数据查看、延迟追踪、地图展示等功能。兼容主流Linux系统，Alpine Linux，Windows系统。**演示地址**：<https://tz.dashdeep.dpdns.org/>
+一个基于 Cloudflare Workers + D1 的多服务器监控探针系统，支持实时监控、历史数据查看、延迟追踪、地图展示等功能。兼容主流Linux系统，Alpine Linux，OpenWrt，Windows系统。**演示地址**：<https://tz.dashdeep.dpdns.org/>
 
-**当前版本：V2.6.6**
+**当前版本：V2.6.7**
 
+- v2.6.7 增加了月流量统计校正功能，以及首页流量统计展示
 - v2.6.6 增加上报间隔，Ping方式，流量重置日入库功能
 - V2.6.5 修复了部分系统启动时间获取错误的问题，TCP/UDP上报格式错误导致失败问题，新增详情页面实时网速展示
 - V2.6.4 增加了 **月流量统计** 功能，升级后请在后台手动点击 **升级数据库** 来更新数据库结构。不然会导致数据库结构错误，影响正常运行。同时需要在后台设置重置日期，并重新安装脚本。
@@ -198,13 +199,19 @@ https://你的项目名.你的子域.workers.dev/admin
 Ubuntu / Debian / CentOS / RHEL / Fedora / Rocky / AlmaLinux 系统
 
 ```bash
-curl -sL https://你的项目.你的子域.workers.dev/install.sh | bash -s install -id=<SERVER_ID> -secret=<SECRET> -url=<WORKER_URL> [-interval=60] [-ping=http] [-ct=xxx] [-cu=xxx] [-cm=xxx] [-bd=xxx]
+curl -sL https://你的项目.你的子域.workers.dev/install.sh | bash -s install -id=<SERVER_ID> -secret=<SECRET> -url=<WORKER_URL> [-interval=60] [-ping=http] [-ct=xxx] [-cu=xxx] [-cm=xxx] [-bd=xxx] [-reset_day=1] [-rx_correction=N] [-tx_correction=N]
 ```
 
 Alpine 系统
 
 ```bash
-curl -sL https://你的项目.你的子域.workers.dev/install-alpine.sh | sh -s install -id=<SERVER_ID> -secret=<SECRET> -url=<WORKER_URL> [-interval=60] [-ping=http] [-ct=xxx] [-cu=xxx] [-cm=xxx] [-bd=xxx]
+curl -sL https://你的项目.你的子域.workers.dev/install-alpine.sh | sh -s install -id=<SERVER_ID> -secret=<SECRET> -url=<WORKER_URL> [-interval=60] [-ping=http] [-ct=xxx] [-cu=xxx] [-cm=xxx] [-bd=xxx] [-reset_day=1] [-rx_correction=N] [-tx_correction=N]
+```
+
+OpenWrt / LEDE / ImmortalWrt 系统
+
+```bash
+curl -sL https://你的项目.你的子域.workers.dev/install-openwrt.sh | sh -s install -id=<SERVER_ID> -secret=<SECRET> -url=<WORKER_URL> [-interval=60] [-ping=http] [-ct=xxx] [-cu=xxx] [-cm=xxx] [-bd=xxx] [-reset_day=1] [-rx_correction=N] [-tx_correction=N]
 ```
 
 ### Windows 系统安装
@@ -236,6 +243,9 @@ curl -sL https://你的项目.你的子域.workers.dev/install-alpine.sh | sh -s
 | `-cu`       | 自定义CU测试节点               | 默认节点   |
 | `-cm`       | 自定义CM测试节点               | 默认节点   |
 | `-bd`       | 自定义BD测试节点               | 默认节点   |
+| `-reset_day`| 流量重置日（1-31）              | `1`    |
+| `-rx_correction` | 下行流量校正（GB，直接设置当月下行数据） | - |
+| `-tx_correction` | 上行流量校正（GB，直接设置当月上行数据） | - |
 
 > **注意**：上报间隔越短，数据越实时，但会增加 API 调用和数据库存储。建议根据服务器数量和网络状况选择合适的间隔。
 
@@ -253,7 +263,13 @@ curl -sL https://你的项目.你的子域.workers.dev/install.sh | bash -s unin
 Alpine 系统
 
 ```bash
-curl -sL https://你的项目.你的子域.workers.dev/install-alpine | sh -s uninstall
+curl -sL https://你的项目.你的子域.workers.dev/install-alpine.sh | sh -s uninstall
+```
+
+OpenWrt / LEDE / ImmortalWrt 系统
+
+```bash
+curl -sL https://你的项目.你的子域.workers.dev/install-openwrt.sh | sh -s uninstall
 ```
 
 Windows 系统
@@ -381,7 +397,9 @@ Windows 系统
 CF-Server-Monitor/
 ├── public/
 │   ├── cf-server-monitor.pyw   # Windows 探针脚本（.pyw 不显示 CMD 窗口）
-│   ├── install.sh              # 一键安装脚本（含卸载）
+│   ├── install.sh              # 一键安装脚本 - systemd 系统 (Ubuntu/Debian/CentOS)
+│   ├── install-alpine.sh       # 一键安装脚本 - OpenRC 系统 (Alpine Linux)
+│   ├── install-openwrt.sh      # 一键安装脚本 - procd 系统 (OpenWrt/LEDE)
 │   └── logo.svg                # Logo
 ├── src/
 │   ├── index.js                # 后端主入口 - 路由分发 + Durable Object 导出

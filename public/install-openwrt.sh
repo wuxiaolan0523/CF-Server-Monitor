@@ -1,19 +1,20 @@
 #!/bin/sh
 # ==============================================================================
 # V1.1.0
-# CF-Server-Monitor 安装/卸载脚本 (Alpine Linux 兼容版)
-# 支持: Alpine Linux (OpenRC / 裸机 / Docker 容器)
-# Fixes: 1. 独立协程无 wait 阻塞 2. 原子化原子覆盖 3. 兼容 OpenRC/无 init 场景
-#        4. 严格 set -u 闭环 5. 自动安装 bash 保证探针脚本语法兼容
+# CF-Server-Monitor 安装/卸载脚本 (OpenWrt 专用版)
+# 支持: OpenWrt / LEDE / ImmortalWrt (procd + opkg)
+# 纯 POSIX sh 实现，无 bash 依赖
+# Fixes: 1. 独立协程无 wait 阻塞 2. 原子化原子覆盖 3. 兼容 procd 服务框架
+#        4. 严格 set -u 闭环 5. 使用 /tmp 替代 /dev/shm（OpenWrt 无 /dev/shm）
 # ==============================================================================
 
 set -eu
 
 # 路径定义（月度流量追踪）
-TRAFFIC_DATA_DIR="/etc/cf-probe/"
+TRAFFIC_DATA_DIR="/var/lib/cf-probe"
 TRAFFIC_DATA_FILE="${TRAFFIC_DATA_DIR}/traffic.dat"
 
-# 颜色定义（busybox sh 下仅 printf '%b' 可用，所以统一用 printf）
+# 颜色定义（busybox sh 下仅 printf '%b' 可用）
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -23,17 +24,18 @@ NC='\033[0m'
 
 # 路径定义
 SERVICE_NAME="cf-probe"
-OPENRC_FILE="/etc/init.d/${SERVICE_NAME}"
+PROCD_FILE="/etc/init.d/${SERVICE_NAME}"
 SCRIPT_FILE="/usr/local/bin/${SERVICE_NAME}.sh"
 PID_FILE="/var/run/${SERVICE_NAME}.pid"
 LOG_FILE="/var/log/${SERVICE_NAME}.log"
+SHM_DIR="/tmp"  # OpenWrt 无 /dev/shm，使用 /tmp 替代
 
 # ---------------------------------------------------------------
-# 统一输出工具
+# 统一输出工具（纯 POSIX sh）
 # ---------------------------------------------------------------
 print_banner() {
     printf '%b╔══════════════════════════════════════════════════╗%b\n' "${CYAN}" "${NC}"
-    printf '%b║     CF-Server-Monitor 探针管理工具 (Alpine)      ║%b\n' "${CYAN}" "${NC}"
+    printf '%b║     CF-Server-Monitor 探针管理工具 (OpenWrt)     ║%b\n' "${CYAN}" "${NC}"
     printf '%b╚══════════════════════════════════════════════════╝%b\n' "${CYAN}" "${NC}"
 }
 
@@ -52,8 +54,8 @@ check_root() {
 # OS / Init 系统探测
 # ---------------------------------------------------------------
 detect_os() {
-    if [ -f /etc/alpine-release ]; then
-        OS_ID="alpine"
+    if [ -f /etc/openwrt_release ]; then
+        OS_ID="openwrt"
     elif [ -f /etc/os-release ]; then
         OS_ID=$(grep -E '^ID=' /etc/os-release | cut -d= -f2 | tr -d '"' | tr -d "'")
     else
@@ -62,12 +64,14 @@ detect_os() {
     OS_ID=${OS_ID:-"unknown"}
 
     case "$OS_ID" in
-        alpine) PKG_MGR="apk" ;;
-        *) warn "检测到非 Alpine 系统: $OS_ID，仍将尝试使用 apk" ; PKG_MGR="apk" ;;
+        openwrt|lede|immortalwrt) PKG_MGR="opkg" ;;
+        *) warn "检测到非 OpenWrt 系统: $OS_ID，仍将尝试使用 opkg" ; PKG_MGR="opkg" ;;
     esac
 
     # 探测 init 系统
-    if command -v rc-service >/dev/null 2>&1 && [ -d /etc/runlevels ]; then
+    if command -v procd >/dev/null 2>&1 || [ -f /sbin/procd ]; then
+        INIT_SYSTEM="procd"
+    elif command -v rc-service >/dev/null 2>&1 && [ -d /etc/runlevels ]; then
         INIT_SYSTEM="openrc"
     elif [ -d /run/systemd/system ]; then
         INIT_SYSTEM="systemd"
@@ -77,42 +81,51 @@ detect_os() {
 }
 
 # ---------------------------------------------------------------
-# 依赖安装（Alpine 版）
+# 依赖安装（OpenWrt 版 — 纯 POSIX sh，无需 bash）
 # ---------------------------------------------------------------
 install_deps() {
     step "检查系统依赖组件..."
 
-    # 必须先装 bash — 探针脚本内部使用了大量 bash-only 语法
-    # coreutils: 提供完整的 df -P、date、nproc、stat 等
-    # procps:    提供完整的 ps -e、pgrep、pkill
-    # iproute2:  提供 ss
-    local required_pkgs="bash curl grep sed coreutils procps iproute2"
+    # OpenWrt 需要的包
+    # curl:      HTTP 上报
+    # coreutils: 提供完整的 date、df 等
+    # procps-ng: 提供完整的 pgrep、pkill
+    # ip-full:   提供 ss 命令（网络连接统计）
+    required_pkgs="curl coreutils procps-ng ip-full"
 
-    if ! command -v apk >/dev/null 2>&1; then
-        error "未找到 apk 包管理器，当前系统不是 Alpine Linux。"
+    if ! command -v opkg >/dev/null 2>&1; then
+        error "未找到 opkg 包管理器，当前系统不是 OpenWrt 系列。"
     fi
 
-    step "刷新 APK 索引并安装基础依赖..."
-    apk update --quiet >/dev/null 2>&1 || true
+    step "更新 OPKG 索引并安装基础依赖..."
+    opkg update >/dev/null 2>&1 || true
     # shellcheck disable=SC2086
-    apk add --no-cache --quiet $required_pkgs >/dev/null 2>&1 || \
-        apk add --no-cache $required_pkgs || \
-        error "依赖包安装失败，请检查网络或手动执行: apk add $required_pkgs"
+    opkg install $required_pkgs >/dev/null 2>&1 || \
+        opkg install --force-overwrite $required_pkgs >/dev/null 2>&1 || \
+        warn "部分依赖安装失败，请手动执行: opkg install $required_pkgs"
 
-    local required_cmds="bash curl awk grep sed ps df ss nproc pgrep pkill"
+    required_cmds="curl awk grep sed"
     for cmd in $required_cmds; do
         if ! command -v "$cmd" >/dev/null 2>&1; then
-            error "缺少必要依赖: $cmd，请手动安装后重试。"
+            warn "缺少依赖: $cmd，某些功能可能不可用。"
         fi
     done
 
-    info "基础依赖组件检查通过（bash/coreutils/procps/iproute2/curl）"
+    # 可选依赖检查（不阻塞安装）
+    for cmd in pgrep pkill ss; do
+        if ! command -v "$cmd" >/dev/null 2>&1; then
+            warn "缺少可选依赖: $cmd（不影响核心监控功能）"
+        fi
+    done
+
+    info "基础依赖组件检查通过"
 
     # 提示 init 情况
     case "$INIT_SYSTEM" in
-        openrc)  info "检测到 OpenRC，将注册为系统服务。" ;;
-        systemd) warn "检测到 systemd — 建议使用原版 install.sh。此处将以手动方式启动。" ;;
-        manual)  warn "未检测到 init 系统（通常是 Docker 容器），将采用后台进程方式运行。" ;;
+        procd)   info "检测到 procd，将注册为 OpenWrt 系统服务。" ;;
+        openrc)  warn "检测到 OpenRC — 建议使用 install-alpine.sh。" ;;
+        systemd) warn "检测到 systemd — 建议使用 install.sh。" ;;
+        manual)  warn "未检测到 init 系统，将采用后台进程方式运行。" ;;
     esac
 }
 
@@ -122,16 +135,15 @@ install_deps() {
 stop_old_service() {
     step "清理可能存在的旧服务进程..."
 
-    # OpenRC 服务
-    if [ "$INIT_SYSTEM" = "openrc" ] && [ -f "$OPENRC_FILE" ]; then
-        rc-service "$SERVICE_NAME" stop >/dev/null 2>&1 || true
-        rc-update del "$SERVICE_NAME" default >/dev/null 2>&1 || true
-        rm -f "$OPENRC_FILE"
+    # procd 服务
+    if [ "$INIT_SYSTEM" = "procd" ] && [ -f "$PROCD_FILE" ]; then
+        "$PROCD_FILE" stop >/dev/null 2>&1 || true
+        "$PROCD_FILE" disable >/dev/null 2>&1 || true
+        rm -f "$PROCD_FILE"
     fi
 
     # PID 文件方式的后台进程
     if [ -f "$PID_FILE" ]; then
-        local old_pid
         old_pid=$(cat "$PID_FILE" 2>/dev/null || echo "")
         if [ -n "$old_pid" ] && kill -0 "$old_pid" >/dev/null 2>&1; then
             kill -TERM "$old_pid" >/dev/null 2>&1 || true
@@ -148,21 +160,22 @@ stop_old_service() {
 }
 
 # ---------------------------------------------------------------
-# 注入探针脚本（内部使用 bash，保证语法兼容）
+# 注入探针脚本（纯 POSIX sh，无任何 bash 特有语法）
+# OpenWrt 适配：/dev/shm → /tmp
 # ---------------------------------------------------------------
 create_script() {
-    local report_interval=${1:-60}
-    local ping_type=${2:-http}
-    local ct_node=${3:-}
-    local cu_node=${4:-}
-    local cm_node=${5:-}
-    local bd_node=${6:-}
-    local reset_day=${7:-1}
+    report_interval=${1:-60}
+    ping_type=${2:-http}
+    ct_node=${3:-}
+    cu_node=${4:-}
+    cm_node=${5:-}
+    bd_node=${6:-}
+    reset_day=${7:-1}
     step "注入工业级监控采集探针..."
 
     # 先写占位符内容，再用 sed 替换 PING_TYPE_PLACEHOLDER
     cat > "${SCRIPT_FILE}" << 'PROBE_EOF'
-#!/bin/bash
+#!/bin/sh
 # 激活严格的未定义变量检查与错误即刻退出
 set -eu
 
@@ -177,20 +190,19 @@ CM_NODE="${8:-}"
 BD_NODE="${9:-}"
 RESET_DAY="${10:-1}"
 
+# OpenWrt 共享内存目录（/dev/shm 在 OpenWrt 上不存在）
+SHM_DIR="/tmp"
+
 # 严苛环境下的规范 JSON 字段转义函数
+# 纯 POSIX sh 实现：使用 sed/tr 替代 ${var//} 和 $'' 语法
 escape_json() {
-    local val="${1:-}"
-    val="${val//\\/\\\\}"
-    val="${val//\"/\\\"}"
-    val="${val//$'\n'/ }"
-    val="${val//$'\r'/}"
-    echo -n "$val"
+    printf '%s' "${1:-}" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr '\n\r' '  '
 }
 
 safe_div() {
-    local num="${1:-0}"
-    local den="${2:-0}"
-    local def="${3:-0}"
+    num="${1:-0}"
+    den="${2:-0}"
+    def="${3:-0}"
     if [ "${den}" -eq 0 ]; then echo "${def}"; else echo $(( num / den )); fi
 }
 
@@ -207,68 +219,64 @@ TRAFFIC_DATA_FILE="${TRAFFIC_DATA_DIR}/traffic.dat"
 get_period_start_ts() {
     reset_day="$1"
     now_ts="$2"
+    year=''; month=''; day=''
+    # 使用 UTC 时间获取年月日（兼容 busybox date 和 GNU date）
+    if date -u -d "@${now_ts}" '+%Y' >/dev/null 2>&1; then
+        year=$(date -u -d "@${now_ts}" '+%Y')
+        month=$(date -u -d "@${now_ts}" '+%m')
+        day=$(date -u -d "@${now_ts}" '+%d')
+    else
+        year=$(date -u -r "${now_ts}" '+%Y')
+        month=$(date -u -r "${now_ts}" '+%m')
+        day=$(date -u -r "${now_ts}" '+%d')
+    fi
 
-    # 当前 UTC 时间拆解（只用 -u + %Y/%m/%d，不用 -d）
-    year=$(date -u '+%Y')
-    month=$(date -u '+%m')
-    day=$(date -u '+%d')
-
-    # 默认目标日修正（防止非法日期）
+    target_day="$reset_day"
+    # 处理月份最后一天：2月最多29天，4/6/9/11月最多30天
     case "$month" in
-        01|03|05|07|08|10|12) max=31 ;;
-        04|06|09|11) max=30 ;;
-        02) max=28 ;;
+        02) [ "$target_day" -gt 29 ] && target_day=29 ;;
+        04|06|09|11) [ "$target_day" -gt 30 ] && target_day=30 ;;
     esac
 
-    [ "$reset_day" -gt "$max" ] && reset_day="$max"
-
-    # 当前是否已过账单日
-    if [ "$day" -ge "$reset_day" ]; then
-        start_date="${year}-${month}-$(printf "%02d" "$reset_day")"
-    else
-        # 上个月
-        if [ "$month" -eq 1 ]; then
-            year=$((year - 1))
-            month=12
+    period_start_ts=''
+    if [ "$day" -ge "$target_day" ]; then
+        if date -u -d "${year}-${month}-${target_day} 00:00:00" '+%s' >/dev/null 2>&1; then
+            period_start_ts=$(date -u -d "${year}-${month}-${target_day} 00:00:00" '+%s')
         else
-            month=$((month - 1))
+            period_start_ts=$(date -u -r "${now_ts}" '+%s')
         fi
-        month=$(printf "%02d" "$month")
-
-        case "$month" in
-            01|03|05|07|08|10|12) max=31 ;;
-            04|06|09|11) max=30 ;;
-            02) max=28 ;;
-        esac
-
-        [ "$reset_day" -gt "$max" ] && reset_day="$max"
-
-        start_date="${year}-${month}-$(printf "%02d" "$reset_day")"
-    fi
-
-    # ⚠️ 关键：只在“确定支持 GNU date”时才转换
-    if date -d "$start_date 00:00:00" "+%s" >/dev/null 2>&1; then
-        date -d "$start_date 00:00:00" "+%s"
     else
-        # fallback：直接返回 now_ts（避免错账，宁可保守）
-        echo "$now_ts"
+        prev_month=$((month - 1))
+        [ "$prev_month" -eq 0 ] && { prev_month=12; year=$((year - 1)); }
+        prev_month_str=$(printf "%02d" "$prev_month")
+        case "$prev_month" in
+            02) [ "$target_day" -gt 29 ] && target_day=29 ;;
+            04|06|09|11) [ "$target_day" -gt 30 ] && target_day=30 ;;
+        esac
+        if date -u -d "${year}-${prev_month_str}-${target_day} 00:00:00" '+%s' >/dev/null 2>&1; then
+            period_start_ts=$(date -u -d "${year}-${prev_month_str}-${target_day} 00:00:00" '+%s')
+        else
+            period_start_ts=$(date -u -r "${now_ts}" '+%s')
+        fi
     fi
+    echo "$period_start_ts"
 }
 
 # 计算月度流量（自动持久化）
 calc_monthly_traffic() {
-    local current_rx="$1"
-    local current_tx="$2"
-    local reset_day="${RESET_DAY:-1}"
-    local now_ts
+    current_rx="$1"
+    current_tx="$2"
+    reset_day="${RESET_DAY:-1}"
     now_ts=$(date '+%s')
-    
+
     mkdir -p "${TRAFFIC_DATA_DIR}" 2>/dev/null || true
-    
+
     # 读取上次保存的数据
-    local saved_rx_prev=0 saved_tx_prev=0 saved_rx_period=0 saved_tx_period=0 saved_last_check=0 saved_period_start=0
+    saved_rx_prev=0; saved_tx_prev=0; saved_rx_period=0; saved_tx_period=0
+    saved_last_check=0; saved_period_start=0
     if [ -f "${TRAFFIC_DATA_FILE}" ]; then
-        local tmp_rx_prev tmp_tx_prev tmp_rx_period tmp_tx_period tmp_last_check tmp_period_start
+        tmp_rx_prev=''; tmp_tx_prev=''; tmp_rx_period=''; tmp_tx_period=''
+        tmp_last_check=''; tmp_period_start=''
         while IFS='=' read -r key value; do
             case "$key" in
                 RX_PREV) tmp_rx_prev="$value" ;;
@@ -283,13 +291,12 @@ calc_monthly_traffic() {
         saved_rx_period=${tmp_rx_period:-0}; saved_tx_period=${tmp_tx_period:-0}
         saved_last_check=${tmp_last_check:-0}; saved_period_start=${tmp_period_start:-0}
     fi
-    
+
     # 计算当前账单周期起始
-    local period_start_ts
     period_start_ts=$(get_period_start_ts "$reset_day" "$now_ts")
-    
+
     # 检测是否是首次运行
-    local rx_delta=0 tx_delta=0
+    rx_delta=0; tx_delta=0
     if [ "$saved_last_check" -ne 0 ]; then
         if [ "$current_rx" -lt "$saved_rx_prev" ] || [ "$current_tx" -lt "$saved_tx_prev" ]; then
             rx_delta=0; tx_delta=0
@@ -297,7 +304,7 @@ calc_monthly_traffic() {
             rx_delta=$((current_rx - saved_rx_prev))
             tx_delta=$((current_tx - saved_tx_prev))
         fi
-        
+
         # 判断是否进入新账单周期（跨月）
         if [ "$period_start_ts" -ne "$saved_period_start" ] && [ "$saved_period_start" -ne 0 ]; then
             saved_rx_period="$rx_delta"; saved_tx_period="$tx_delta"
@@ -309,7 +316,7 @@ calc_monthly_traffic() {
         saved_rx_period=0
         saved_tx_period=0
     fi
-    
+
     # 持久化保存
     cat > "${TRAFFIC_DATA_FILE}.tmp" << EOF
 RX_PREV=${current_rx}
@@ -320,7 +327,7 @@ LAST_CHECK=${now_ts}
 PERIOD_START=${period_start_ts}
 EOF
     mv "${TRAFFIC_DATA_FILE}.tmp" "${TRAFFIC_DATA_FILE}" 2>/dev/null || true
-    
+
     # 返回当月流量（上行=tx, 下行=rx）
     echo "$saved_rx_period $saved_tx_period"
 }
@@ -329,9 +336,7 @@ get_cpu_stat() {
     awk '/^cpu /{total=$2+$3+$4+$5+$6+$7+$8+$9;idle=$5+$6;printf "%.0f %.0f\n",total,idle}' /proc/stat 2>/dev/null || echo "0 0";
 }
 
-
 get_http_ping() {
-    local rtt
     rtt=$(curl -o /dev/null -s -m 1 --connect-timeout 1 -w "%{time_total}" "http://${1:-}" 2>/dev/null | awk '{printf "%.0f", $1*1000}')
     if [ -n "$rtt" ] && [ "$rtt" -gt 0 ] 2>/dev/null; then
         echo "$rtt"
@@ -341,10 +346,10 @@ get_http_ping() {
 }
 
 get_tcp_ping() {
-    local host="${1:-}"
-    local port="${2:-443}"
-    local scheme="http"
-    local timing
+    host="${1:-}"
+    port="${2:-443}"
+    scheme="http"
+    timing=''
 
     if [ -z "${host}" ]; then
         echo ""
@@ -376,8 +381,8 @@ get_tcp_ping() {
 }
 
 get_ping() {
-    local host="$1"
-    local port="${2:-443}"
+    host="$1"
+    port="${2:-443}"
 
     if [ "${PING_TYPE}" = "tcp" ]; then
         get_tcp_ping "$host" "$port"
@@ -394,26 +399,27 @@ BD_NODE="${BD_NODE:-}"
 
 # ==============================================================================
 # 高并发/无竞态后台网络 Worker 协程
+# OpenWrt 适配：使用 /tmp 替代 /dev/shm
 # ==============================================================================
 run_network_worker() {
     set -eu
-    local last_ip=0
-    local last_ping=0
+    last_ip=0
+    last_ping=0
 
     while true; do
-        local now; now=$(date +%s)
+        now=$(date +%s)
 
         if [ $((now - last_ip)) -ge 600 ] || [ "$last_ip" -eq 0 ]; then
-            (curl -s -m 2 --connect-timeout 2 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "ip=" && echo "1" || echo "0") > /dev/shm/.cf_ipv4.tmp && mv /dev/shm/.cf_ipv4.tmp /dev/shm/.cf_ipv4 || true
-            (curl -6 -s -m 2 --connect-timeout 2 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "ip=" && echo "1" || echo "0") > /dev/shm/.cf_ipv6.tmp && mv /dev/shm/.cf_ipv6.tmp /dev/shm/.cf_ipv6 || true
+            (curl -s -m 2 --connect-timeout 2 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "ip=" && echo "1" || echo "0") > /tmp/.cf_ipv4.tmp && mv /tmp/.cf_ipv4.tmp /tmp/.cf_ipv4 || true
+            (curl -6 -s -m 2 --connect-timeout 2 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | grep -q "ip=" && echo "1" || echo "0") > /tmp/.cf_ipv6.tmp && mv /tmp/.cf_ipv6.tmp /tmp/.cf_ipv6 || true
             last_ip="$now"
         fi
 
         if [ $((now - last_ping)) -ge 30 ] || [ "$last_ping" -eq 0 ]; then
-            [ -n "$CT_NODE" ] && get_ping "$CT_NODE" > /dev/shm/.cf_ping_ct.tmp && mv /dev/shm/.cf_ping_ct.tmp /dev/shm/.cf_ping_ct || rm -f /dev/shm/.cf_ping_ct
-            [ -n "$CU_NODE" ] && get_ping "$CU_NODE" > /dev/shm/.cf_ping_cu.tmp && mv /dev/shm/.cf_ping_cu.tmp /dev/shm/.cf_ping_cu || rm -f /dev/shm/.cf_ping_cu
-            [ -n "$CM_NODE" ] && get_ping "$CM_NODE" > /dev/shm/.cf_ping_cm.tmp && mv /dev/shm/.cf_ping_cm.tmp /dev/shm/.cf_ping_cm || rm -f /dev/shm/.cf_ping_cm
-            [ -n "$BD_NODE" ] && get_ping "$BD_NODE" > /dev/shm/.cf_ping_bd.tmp && mv /dev/shm/.cf_ping_bd.tmp /dev/shm/.cf_ping_bd || rm -f /dev/shm/.cf_ping_bd
+            [ -n "$CT_NODE" ] && get_ping "$CT_NODE" > /tmp/.cf_ping_ct.tmp && mv /tmp/.cf_ping_ct.tmp /tmp/.cf_ping_ct || rm -f /tmp/.cf_ping_ct
+            [ -n "$CU_NODE" ] && get_ping "$CU_NODE" > /tmp/.cf_ping_cu.tmp && mv /tmp/.cf_ping_cu.tmp /tmp/.cf_ping_cu || rm -f /tmp/.cf_ping_cu
+            [ -n "$CM_NODE" ] && get_ping "$CM_NODE" > /tmp/.cf_ping_cm.tmp && mv /tmp/.cf_ping_cm.tmp /tmp/.cf_ping_cm || rm -f /tmp/.cf_ping_cm
+            [ -n "$BD_NODE" ] && get_ping "$BD_NODE" > /tmp/.cf_ping_bd.tmp && mv /tmp/.cf_ping_bd.tmp /tmp/.cf_ping_bd || rm -f /tmp/.cf_ping_bd
             last_ping="$now"
         fi
         sleep 5
@@ -489,7 +495,7 @@ while true; do
     else
         OS_RAW=$(uname -srm)
     fi
-    OS=${OS_RAW:-"Alpine Linux"}
+    OS=${OS_RAW:-"OpenWrt"}
     ARCH=$(uname -m)
     BOOT_TIME=$(awk '$1=="btime"{print $2}' /proc/stat 2>/dev/null)
     if [ -n "${BOOT_TIME:-}" ]; then
@@ -509,13 +515,13 @@ while true; do
     CPU_CORES=$(nproc 2>/dev/null || grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo "1")
     LOAD_AVG=$(cat /proc/loadavg 2>/dev/null | awk '{print $1, $2, $3}' || echo "0 0 0")
     PROCESSES=$(ps -e 2>/dev/null | wc -l || echo 0)
-    TCP_CONN=$(ss -ant 2>/dev/null | grep -c -v State || wc -l < /proc/net/tcp 2>/dev/null || echo 0)
-    UDP_CONN=$(ss -anu 2>/dev/null | grep -c -v State || wc -l < /proc/net/udp 2>/dev/null || echo 0)
+    TCP_CONN=$(wc -l < /proc/net/tcp 2>/dev/null || echo 0)
+    UDP_CONN=$(wc -l < /proc/net/udp 2>/dev/null || echo 0)
 
     NET_STAT=$(get_net_bytes)
     RX_NOW=$(echo "$NET_STAT" | awk '{print $1}'); RX_NOW=${RX_NOW:-0}
     TX_NOW=$(echo "$NET_STAT" | awk '{print $2}'); TX_NOW=${TX_NOW:-0}
-    
+
     MONTHLY_TRAFFIC=$(calc_monthly_traffic "$RX_NOW" "$TX_NOW")
     RX_MONTHLY=$(echo "$MONTHLY_TRAFFIC" | awk '{print $1}')
     TX_MONTHLY=$(echo "$MONTHLY_TRAFFIC" | awk '{print $2}')
@@ -535,12 +541,12 @@ while true; do
     TX_PREV=${TX_NOW}
     PREV_LOOP_TIME=${LOOP_START_TIME}
 
-    [ -f /dev/shm/.cf_ipv4 ] && IPV4=$(cat /dev/shm/.cf_ipv4) || IPV4="0"
-    [ -f /dev/shm/.cf_ipv6 ] && IPV6=$(cat /dev/shm/.cf_ipv6) || IPV6="0"
-    [ -f /dev/shm/.cf_ping_ct ] && PING_CT=$(cat /dev/shm/.cf_ping_ct) || PING_CT=""
-    [ -f /dev/shm/.cf_ping_cu ] && PING_CU=$(cat /dev/shm/.cf_ping_cu) || PING_CU=""
-    [ -f /dev/shm/.cf_ping_cm ] && PING_CM=$(cat /dev/shm/.cf_ping_cm) || PING_CM=""
-    [ -f /dev/shm/.cf_ping_bd ] && PING_BD=$(cat /dev/shm/.cf_ping_bd) || PING_BD=""
+    [ -f /tmp/.cf_ipv4 ] && IPV4=$(cat /tmp/.cf_ipv4) || IPV4="0"
+    [ -f /tmp/.cf_ipv6 ] && IPV6=$(cat /tmp/.cf_ipv6) || IPV6="0"
+    [ -f /tmp/.cf_ping_ct ] && PING_CT=$(cat /tmp/.cf_ping_ct) || PING_CT=""
+    [ -f /tmp/.cf_ping_cu ] && PING_CU=$(cat /tmp/.cf_ping_cu) || PING_CU=""
+    [ -f /tmp/.cf_ping_cm ] && PING_CM=$(cat /tmp/.cf_ping_cm) || PING_CM=""
+    [ -f /tmp/.cf_ping_bd ] && PING_BD=$(cat /tmp/.cf_ping_bd) || PING_BD=""
 
     EOS=$(escape_json "${OS}")
     EARCH=$(escape_json "${ARCH}")
@@ -560,9 +566,7 @@ EOF
 done
 PROBE_EOF
 
-    # Alpine 的 sed 支持 -i，但 busybox sed 不支持。确保安装了 GNU sed 或用迂回写法
-    # 这里使用临时文件方式以兼容任何 sed
-    local tmpfile
+    # BusyBox sed 可能不支持 -i，使用临时文件方式
     tmpfile="${SCRIPT_FILE}.tmp"
     sed "s/PING_TYPE_PLACEHOLDER/${ping_type}/g" "${SCRIPT_FILE}" > "$tmpfile" && mv "$tmpfile" "${SCRIPT_FILE}"
 
@@ -571,59 +575,69 @@ PROBE_EOF
 }
 
 # ---------------------------------------------------------------
-# 创建 OpenRC 服务脚本 / 手动启停入口
+# 创建 procd 服务脚本 / 手动启停入口
 # ---------------------------------------------------------------
 create_service() {
-    local ct_node="${1:-}"
-    local cu_node="${2:-}"
-    local cm_node="${3:-}"
-    local bd_node="${4:-}"
-    
-    local esc_id; esc_id=$(printf '%s' "$SERVER_ID" | sed 's/\\/\\\\/g; s/"/\\"/g')
-    local esc_sec; esc_sec=$(printf '%s' "$SECRET" | sed 's/\\/\\\\/g; s/"/\\"/g; s/%/%%/g')
-    local esc_url; esc_url=$(printf '%s' "$WORKER_URL" | sed 's/\\/\\\\/g; s/"/\\"/g')
-    local esc_ping; esc_ping=$(printf '%s' "$PING_TYPE" | sed 's/\\/\\\\/g; s/"/\\"/g')
-    local esc_ct; esc_ct=$(printf '%s' "$ct_node" | sed 's/\\/\\\\/g; s/"/\\"/g')
-    local esc_cu; esc_cu=$(printf '%s' "$cu_node" | sed 's/\\/\\\\/g; s/"/\\"/g')
-    local esc_cm; esc_cm=$(printf '%s' "$cm_node" | sed 's/\\/\\\\/g; s/"/\\"/g')
-    local esc_bd; esc_bd=$(printf '%s' "$bd_node" | sed 's/\\/\\\\/g; s/"/\\"/g')
-    local esc_reset_day; esc_reset_day=$(printf '%s' "$RESET_DAY" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    ct_node="${1:-}"
+    cu_node="${2:-}"
+    cm_node="${3:-}"
+    bd_node="${4:-}"
 
-    local exec_line
-    exec_line="/bin/bash \"${SCRIPT_FILE}\" \"${esc_id}\" \"${esc_sec}\" \"${esc_url}\" \"${REPORT_INTERVAL}\" \"${esc_ping}\" \"${esc_ct}\" \"${esc_cu}\" \"${esc_cm}\" \"${esc_bd}\" \"${esc_reset_day}\""
+    esc_id=$(printf '%s' "$SERVER_ID" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    esc_sec=$(printf '%s' "$SECRET" | sed 's/\\/\\\\/g; s/"/\\"/g; s/%/%%/g')
+    esc_url=$(printf '%s' "$WORKER_URL" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    esc_ping=$(printf '%s' "$PING_TYPE" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    esc_ct=$(printf '%s' "$ct_node" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    esc_cu=$(printf '%s' "$cu_node" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    esc_cm=$(printf '%s' "$cm_node" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    esc_bd=$(printf '%s' "$bd_node" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    esc_reset_day=$(printf '%s' "$RESET_DAY" | sed 's/\\/\\\\/g; s/"/\\"/g')
 
-    if [ "$INIT_SYSTEM" = "openrc" ]; then
-        step "构建 OpenRC init 脚本..."
-        cat > "${OPENRC_FILE}" << EOF
-#!/sbin/openrc-run
-# CF-Server-Monitor Probe Agent (Alpine Linux)
+    exec_line="/bin/sh \"${SCRIPT_FILE}\" \"${esc_id}\" \"${esc_sec}\" \"${esc_url}\" \"${REPORT_INTERVAL}\" \"${esc_ping}\" \"${esc_ct}\" \"${esc_cu}\" \"${esc_cm}\" \"${esc_bd}\" \"${esc_reset_day}\""
 
-description="CF Server Monitor Probe Agent"
-command="/bin/bash"
-command_args="${SCRIPT_FILE} ${esc_id} ${esc_sec} ${esc_url} ${REPORT_INTERVAL} ${esc_ping} ${esc_ct} ${esc_cu} ${esc_cm} ${esc_bd} ${esc_reset_day}"
-command_background="yes"
-pidfile="${PID_FILE}"
-output_log="${LOG_FILE}"
-error_log="${LOG_FILE}"
+    if [ "$INIT_SYSTEM" = "procd" ]; then
+        step "构建 procd init 脚本..."
+        cat > "${PROCD_FILE}" << EOF
+#!/bin/sh /etc/rc.common
 
-depend() {
-    need net
-    use dns
-    after firewall
+# CF-Server-Monitor Probe Agent (OpenWrt / procd)
+# 自动生成，请勿直接修改。
+
+START=99
+STOP=15
+
+USE_PROCD=1
+
+start_service() {
+    procd_open_instance
+    procd_set_param command /bin/sh "${SCRIPT_FILE}" "${esc_id}" "${esc_sec}" "${esc_url}" "${REPORT_INTERVAL}" "${esc_ping}" "${esc_ct}" "${esc_cu}" "${esc_cm}" "${esc_bd}" "${esc_reset_day}"
+    procd_set_param respawn 3600 5 5
+    procd_set_param stdout 1
+    procd_set_param stderr 1
+    procd_set_param pidfile "${PID_FILE}"
+    procd_close_instance
+}
+
+stop_service() {
+    rm -f "${PID_FILE}"
+}
+
+service_triggers() {
+    procd_add_reload_trigger "${SERVICE_NAME}"
 }
 EOF
-        chmod +x "${OPENRC_FILE}"
-        info "OpenRC 服务脚本生成: ${OPENRC_FILE}"
+        chmod +x "${PROCD_FILE}"
+        info "procd 服务脚本生成: ${PROCD_FILE}"
     else
-        step "非 OpenRC 环境 — 将使用手动后台进程方式运行..."
-        info "启停命令将写入: ${SCRIPT_FILE}.ctl（同时打印在下方）"
+        step "非 procd 环境 — 将使用手动后台进程方式运行..."
+        info "启停命令将写入: ${SCRIPT_FILE}.ctl"
     fi
 
     # 记录用于手动启停的命令（两种模式都用）
     echo "#!/bin/sh
-# CF-Server-Monitor 手动启停脚本（Alpine Linux）
+# CF-Server-Monitor 手动启停脚本（OpenWrt 兼容）
 # 自动生成，请勿直接修改参数。
-START_CMD='${exec_line} > ${LOG_FILE} 2>&1 &'
+START_CMD=\"${exec_line} >> ${LOG_FILE} 2>&1 &\"
 PID_FILE='${PID_FILE}'
 LOG_FILE='${LOG_FILE}'
 
@@ -667,7 +681,7 @@ case \"\${1:-start}\" in
         tail -f \$LOG_FILE
         ;;
     *)
-        echo '用法: $0 {start|stop|status|restart|log}'
+        echo '用法: \$0 {start|stop|status|restart|log}'
         exit 1
         ;;
 esac
@@ -681,9 +695,9 @@ esac
 start_service() {
     step "加载进程树并激活监控探针..."
 
-    if [ "$INIT_SYSTEM" = "openrc" ]; then
-        rc-update add "${SERVICE_NAME}" default >/dev/null 2>&1 || true
-        rc-service "${SERVICE_NAME}" restart || error "OpenRC 服务启动失败，请检查日志: tail -n 30 ${LOG_FILE}"
+    if [ "$INIT_SYSTEM" = "procd" ]; then
+        "$PROCD_FILE" enable >/dev/null 2>&1 || true
+        "$PROCD_FILE" restart || error "procd 服务启动失败，请检查日志: tail -n 30 ${LOG_FILE}"
     else
         sh "${SCRIPT_FILE}.ctl" start || error "后台进程启动失败，请检查日志: tail -n 30 ${LOG_FILE}"
     fi
@@ -693,7 +707,8 @@ start_service() {
     if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" >/dev/null 2>&1; then
         info "探针监控引擎已进入平稳运行状态。"
     else
-        error "探针服务未能启动成功。请排查: tail -n 30 ${LOG_FILE}"
+        warn "探针服务可能未启动成功。请排查: tail -n 30 ${LOG_FILE}"
+        warn "在 OpenWrt 上可执行: ${PROCD_FILE} status"
     fi
 }
 
@@ -771,41 +786,42 @@ install_probe() {
     stop_old_service
     if [ -n "${RX_CORRECTION}" ] || [ -n "${TX_CORRECTION}" ]; then
         step "应用流量校正..."
-        local traffic_data_dir="/var/lib/cf-probe"
-        local traffic_data_file="${traffic_data_dir}/traffic.dat"
-        
+        traffic_data_dir="/var/lib/cf-probe"
+        traffic_data_file="${traffic_data_dir}/traffic.dat"
+
         if [ -f "${traffic_data_file}" ]; then
-            local current_rx_period=0 current_tx_period=0
+            current_rx_period=0; current_tx_period=0
             while IFS='=' read -r key value; do
                 case "$key" in
                     RX_PERIOD) current_rx_period="${value}" ;;
                     TX_PERIOD) current_tx_period="${value}" ;;
                 esac
             done < "${traffic_data_file}"
-            
+
             if [ -n "${RX_CORRECTION}" ] && echo "${RX_CORRECTION}" | awk '{exit($1 == 0)}' 2>/dev/null; then
-                local rx_correction_bytes=$(echo "${RX_CORRECTION}" | awk '{printf "%.0f", $1 * 1024 * 1024 * 1024}')
+                rx_correction_bytes=$(echo "${RX_CORRECTION}" | awk '{printf "%.0f", $1 * 1024 * 1024 * 1024}')
                 current_rx_period="${rx_correction_bytes}"
                 info "下行流量校正: ${RX_CORRECTION}GB"
             fi
-            
+
             if [ -n "${TX_CORRECTION}" ] && echo "${TX_CORRECTION}" | awk '{exit($1 == 0)}' 2>/dev/null; then
-                local tx_correction_bytes=$(echo "${TX_CORRECTION}" | awk '{printf "%.0f", $1 * 1024 * 1024 * 1024}')
+                tx_correction_bytes=$(echo "${TX_CORRECTION}" | awk '{printf "%.0f", $1 * 1024 * 1024 * 1024}')
                 current_tx_period="${tx_correction_bytes}"
                 info "上行流量校正: ${TX_CORRECTION}GB"
             fi
-            
-            sed -i "s/RX_PERIOD=.*/RX_PERIOD=${current_rx_period}/" "${traffic_data_file}"
-            sed -i "s/TX_PERIOD=.*/TX_PERIOD=${current_tx_period}/" "${traffic_data_file}"
-            success "流量校正完成"
+
+            # BusyBox sed 兼容：使用临时文件
+            tmp_traffic="${traffic_data_file}.sed.tmp"
+            sed "s/RX_PERIOD=.*/RX_PERIOD=${current_rx_period}/" "${traffic_data_file}" > "$tmp_traffic" && mv "$tmp_traffic" "${traffic_data_file}"
+            sed "s/TX_PERIOD=.*/TX_PERIOD=${current_tx_period}/" "${traffic_data_file}" > "$tmp_traffic" && mv "$tmp_traffic" "${traffic_data_file}"
+            info "流量校正完成"
         else
             if [ -n "${RX_CORRECTION}" ] || [ -n "${TX_CORRECTION}" ]; then
                 mkdir -p "${traffic_data_dir}" 2>/dev/null || true
-                local now_ts=$(date '+%s')
-                local rx_correction_bytes=0 tx_correction_bytes=0
-                # 获取当前网卡总流量，用于设置 RX_PREV/TX_PREV，避免 delta 计算引入历史流量
-                local current_rx=$(awk 'NR>2{rx+=$2}END{printf "%.0f", rx}' /proc/net/dev 2>/dev/null || echo 0)
-                local current_tx=$(awk 'NR>2{tx+=$10}END{printf "%.0f", tx}' /proc/net/dev 2>/dev/null || echo 0)
+                now_ts=$(date '+%s')
+                rx_correction_bytes=0; tx_correction_bytes=0
+                current_rx=$(awk 'NR>2{rx+=$2}END{printf "%.0f", rx}' /proc/net/dev 2>/dev/null || echo 0)
+                current_tx=$(awk 'NR>2{tx+=$10}END{printf "%.0f", tx}' /proc/net/dev 2>/dev/null || echo 0)
                 [ -n "${RX_CORRECTION}" ] && echo "${RX_CORRECTION}" | awk '{exit($1 == 0)}' 2>/dev/null && rx_correction_bytes=$(echo "${RX_CORRECTION}" | awk '{printf "%.0f", $1 * 1024 * 1024 * 1024}')
                 [ -n "${TX_CORRECTION}" ] && echo "${TX_CORRECTION}" | awk '{exit($1 == 0)}' 2>/dev/null && tx_correction_bytes=$(echo "${TX_CORRECTION}" | awk '{printf "%.0f", $1 * 1024 * 1024 * 1024}')
                 echo "${RX_CORRECTION}" | awk '{exit($1 == 0)}' 2>/dev/null && info "下行流量校正: ${RX_CORRECTION}GB (新建)"
@@ -818,7 +834,7 @@ TX_PERIOD=${tx_correction_bytes}
 LAST_CHECK=${now_ts}
 PERIOD_START=0
 EOF
-                success "流量数据文件创建完成"
+                info "流量数据文件创建完成"
             fi
         fi
     fi
@@ -846,14 +862,14 @@ EOF
     [ -n "${BD_NODE}" ] && printf  '    ● BD节点      : %s\n' "${BD_NODE}"
     printf  '  运行模式 : '
     case "$INIT_SYSTEM" in
-        openrc) echo "OpenRC 系统服务 (${OPENRC_FILE})" ;;
-        *)      echo "手动后台进程 (PID: $(cat "$PID_FILE"))" ;;
+        procd) echo "procd 系统服务 (${PROCD_FILE})" ;;
+        *)     echo "手动后台进程 (PID: $(cat "$PID_FILE"))" ;;
     esac
     printf  '  管理指令 :\n'
-    if [ "$INIT_SYSTEM" = "openrc" ]; then
+    if [ "$INIT_SYSTEM" = "procd" ]; then
         printf  '    ● 查看日志     : tail -f %s\n' "${LOG_FILE}"
-        printf  '    ● 查看状态     : rc-service %s status\n' "${SERVICE_NAME}"
-        printf  '    ● 启动/停止    : rc-service %s {start|stop|restart}\n' "${SERVICE_NAME}"
+        printf  '    ● 查看状态     : %s status\n' "${PROCD_FILE}"
+        printf  '    ● 启动/停止    : %s {start|stop|restart}\n' "${PROCD_FILE}"
     else
         printf  '    ● 查看日志     : tail -f %s\n' "${LOG_FILE}"
         printf  '    ● 启动/停止    : sh %s {start|stop|restart|status|log}\n' "${SCRIPT_FILE}.ctl"
@@ -874,15 +890,15 @@ uninstall_probe() {
     step "停用并撤销系统守护进程..."
     stop_old_service
 
-    step "清理服务描述性系统文件..."
-    rm -f "${OPENRC_FILE}"
+    step "清理服务脚本文件..."
+    rm -f "${PROCD_FILE}"
 
     step "销毁探针物理可执行代码文件..."
     rm -f "${SCRIPT_FILE}"
     rm -f "${SCRIPT_FILE}.ctl"
 
     step "抹除共享内存高速缓存区..."
-    rm -f /dev/shm/.cf_ipv4 /dev/shm/.cf_ipv6 /dev/shm/.cf_ping_* 2>/dev/null || true
+    rm -f /tmp/.cf_ipv4 /tmp/.cf_ipv6 /tmp/.cf_ping_* 2>/dev/null || true
 
     step "抹除流量追踪数据..."
     rm -rf /var/lib/${SERVICE_NAME}

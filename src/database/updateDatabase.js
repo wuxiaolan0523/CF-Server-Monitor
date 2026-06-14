@@ -83,7 +83,8 @@ async function addServerColumns(db) {
       sort_order: "INTEGER DEFAULT 0",
       reset_day: "INTEGER DEFAULT 1",
       report_interval: "INTEGER DEFAULT 60",
-      ping_mode: "TEXT DEFAULT 'http'"
+      ping_mode: "TEXT DEFAULT 'http'",
+      traffic_calc_type: "TEXT DEFAULT 'total'"
     };
     
     let added = 0;

@@ -204,7 +204,13 @@ const translations = reactive({
     monthlyTraffic: 'Monthly Traffic',
     monthlyTrafficLimit: 'Traffic Limit',
     trafficResetDay: 'Traffic Reset Day',
-    trafficResetDayTip: 'After modifying, you need to reinstall the agent on the server.'
+    trafficResetDayTip: 'After modifying, you need to reinstall the agent on the server.',
+    rxCorrection: 'Download Correction',
+    txCorrection: 'Upload Correction',
+    trafficCalcType: 'Traffic Calculation Type',
+    trafficCalcTotal: 'Upload + Download',
+    trafficCalcUl: 'Upload Only',
+    trafficCalcDl: 'Download Only'
   },
   zh: {
     theme: '主题',
@@ -409,7 +415,13 @@ const translations = reactive({
     monthlyTraffic: '月度流量',
     monthlyTrafficLimit: '月度流量限制',
     trafficResetDay: '流量重置日',
-    trafficResetDayTip: '修改之后，需要在服务器中重新安装探针。'
+    trafficResetDayTip: '修改之后，需要在服务器中重新安装探针。',
+    rxCorrection: '下行流量校正',
+    txCorrection: '上行流量校正',
+    trafficCalcType: '月流量计算类型',
+    trafficCalcTotal: '上行+下行',
+    trafficCalcUl: '仅上行',
+    trafficCalcDl: '仅下行'
   }
 })
 

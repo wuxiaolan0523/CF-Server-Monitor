@@ -338,7 +338,7 @@ export async function handleAdminAPI(request, env, sys) {
       });
     }
     else if (data.action === 'edit') {
-      const { id, name, server_group, price, expire_date, bandwidth, traffic_limit, reset_day, report_interval, ping_mode, is_hidden } = data;
+      const { id, name, server_group, price, expire_date, bandwidth, traffic_limit, traffic_calc_type, reset_day, report_interval, ping_mode, is_hidden } = data;
       if (!id || !isValidUUID(id)) {
         return new Response(JSON.stringify({ error: '服务器 ID 无效' }), { 
           status: 400,
@@ -350,7 +350,7 @@ export async function handleAdminAPI(request, env, sys) {
         if (name && typeof name === 'string' && name.trim().length > 0 && name.length <= 100) {
           await env.DB.prepare(`
             UPDATE servers 
-            SET name = ?, server_group = ?, price = ?, expire_date = ?, bandwidth = ?, traffic_limit = ?, reset_day = ?, report_interval = ?, ping_mode = ?, is_hidden = ? 
+            SET name = ?, server_group = ?, price = ?, expire_date = ?, bandwidth = ?, traffic_limit = ?, traffic_calc_type = ?, reset_day = ?, report_interval = ?, ping_mode = ?, is_hidden = ? 
             WHERE id = ?
           `).bind(
             name,
@@ -359,6 +359,7 @@ export async function handleAdminAPI(request, env, sys) {
             expire_date || '', 
             bandwidth || '', 
             traffic_limit || '',
+            traffic_calc_type || 'total',
             reset_day || 1,
             report_interval || 60,
             ping_mode || 'http',
@@ -368,7 +369,7 @@ export async function handleAdminAPI(request, env, sys) {
         } else {
           await env.DB.prepare(`
             UPDATE servers 
-            SET server_group = ?, price = ?, expire_date = ?, bandwidth = ?, traffic_limit = ?, reset_day = ?, report_interval = ?, ping_mode = ?, is_hidden = ? 
+            SET server_group = ?, price = ?, expire_date = ?, bandwidth = ?, traffic_limit = ?, traffic_calc_type = ?, reset_day = ?, report_interval = ?, ping_mode = ?, is_hidden = ? 
             WHERE id = ?
           `).bind(
             server_group || 'Default', 
@@ -376,6 +377,7 @@ export async function handleAdminAPI(request, env, sys) {
             expire_date || '', 
             bandwidth || '', 
             traffic_limit || '',
+            traffic_calc_type || 'total',
             reset_day || 1,
             report_interval || 60,
             ping_mode || 'http',
@@ -397,6 +399,7 @@ export async function handleAdminAPI(request, env, sys) {
       }
       
       clearServersListCache();
+      clearServerDetailCache(id);
       
       return new Response(JSON.stringify({ 
         success: true, 
